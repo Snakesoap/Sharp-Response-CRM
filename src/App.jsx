@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Plus, Phone, MessageSquare, Search, Building2, User, Globe, 
   FileText, ChevronDown, X, Trash2, Edit3, Save, Filter,
-  Flame, Send, Play, CheckCircle, XCircle
+  Flame, Send, Play, CheckCircle, XCircle, Upload, Download
 } from 'lucide-react';
 
 const PIPELINE_STAGES = [
@@ -39,6 +39,9 @@ export default function App() {
   const [nicheFilter, setNicheFilter] = useState('All');
   const [stageFilter, setStageFilter] = useState('All');
   const [showFilters, setShowFilters] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importPreview, setImportPreview] = useState([]);
+  const [importError, setImportError] = useState('');
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -88,6 +91,160 @@ export default function App() {
     setLeads(prev => prev.map(lead => 
       lead.id === leadId ? { ...lead, stage: newStage } : lead
     ));
+  };
+
+  const parseCSV = (text) => {
+    const lines = text.trim().split('\n');
+    if (lines.length < 2) {
+      throw new Error('CSV must have a header row and at least one data row');
+    }
+
+    // Parse header - normalize column names
+    const rawHeaders = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
+    
+    // Map various column name formats to our fields
+    const headerMap = {};
+    rawHeaders.forEach((h, i) => {
+      if (h.includes('company') || h === 'name' || h === 'business') headerMap.companyName = i;
+      else if (h.includes('owner') || h.includes('contact') || h === 'person') headerMap.ownerName = i;
+      else if (h.includes('phone') || h.includes('tel') || h.includes('mobile')) headerMap.phone = i;
+      else if (h.includes('niche') || h.includes('industry') || h.includes('type') || h.includes('category')) headerMap.niche = i;
+      else if (h.includes('website') || h.includes('web') || h.includes('site') || h.includes('status')) headerMap.websiteStatus = i;
+      else if (h.includes('note') || h.includes('comment') || h.includes('description')) headerMap.notes = i;
+      else if (h.includes('stage') || h.includes('pipeline')) headerMap.stage = i;
+    });
+
+    if (headerMap.companyName === undefined) {
+      throw new Error('CSV must have a Company Name column (or "company", "name", "business")');
+    }
+
+    // Parse data rows
+    const leads = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      // Handle quoted values with commas inside
+      const values = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let char of line) {
+        if (char === '"' || char === "'") {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          values.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current.trim());
+
+      // Map values to lead object
+      const getValue = (key) => {
+        const idx = headerMap[key];
+        return idx !== undefined ? (values[idx] || '').replace(/^["']|["']$/g, '') : '';
+      };
+
+      // Normalize niche value
+      let niche = getValue('niche').toUpperCase();
+      if (niche.includes('HVAC') || niche.includes('HEAT') || niche.includes('AIR') || niche.includes('AC')) {
+        niche = 'HVAC';
+      } else if (niche.includes('PLUMB')) {
+        niche = 'Plumbing';
+      } else {
+        niche = NICHES.includes(niche) ? niche : 'HVAC'; // Default to HVAC
+      }
+
+      // Normalize website status
+      let websiteStatus = getValue('websiteStatus');
+      if (!WEBSITE_STATUSES.includes(websiteStatus)) {
+        if (websiteStatus.toLowerCase().includes('none') || websiteStatus === '') {
+          websiteStatus = 'None';
+        } else if (websiteStatus.toLowerCase().includes('basic') || websiteStatus.toLowerCase().includes('simple')) {
+          websiteStatus = 'Basic';
+        } else if (websiteStatus.toLowerCase().includes('pro') || websiteStatus.toLowerCase().includes('good')) {
+          websiteStatus = 'Professional';
+        } else {
+          websiteStatus = 'Unknown';
+        }
+      }
+
+      // Normalize stage
+      let stage = getValue('stage').toLowerCase();
+      const stageMatch = PIPELINE_STAGES.find(s => 
+        s.id === stage || s.label.toLowerCase() === stage
+      );
+      stage = stageMatch ? stageMatch.id : 'cold';
+
+      const companyName = getValue('companyName');
+      if (companyName) {
+        leads.push({
+          id: generateId(),
+          companyName,
+          ownerName: getValue('ownerName'),
+          phone: getValue('phone'),
+          niche,
+          websiteStatus,
+          notes: getValue('notes'),
+          stage,
+          createdAt: new Date().toISOString()
+        });
+      }
+    }
+
+    return leads;
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportError('');
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result;
+        const parsedLeads = parseCSV(text);
+        if (parsedLeads.length === 0) {
+          throw new Error('No valid leads found in CSV');
+        }
+        setImportPreview(parsedLeads);
+      } catch (err) {
+        setImportError(err.message);
+        setImportPreview([]);
+      }
+    };
+    reader.onerror = () => {
+      setImportError('Failed to read file');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleConfirmImport = () => {
+    setLeads(prev => [...importPreview, ...prev]);
+    setImportPreview([]);
+    setShowImportModal(false);
+    setImportError('');
+  };
+
+  const handleCancelImport = () => {
+    setImportPreview([]);
+    setShowImportModal(false);
+    setImportError('');
+  };
+
+  const downloadTemplate = () => {
+    const template = 'Company Name,Owner Name,Phone,Niche,Website Status,Notes,Stage\nABC Plumbing,John Smith,5551234567,Plumbing,Basic,Called last week,cold\nCool Air HVAC,Jane Doe,5559876543,HVAC,None,Interested in demo,contacted';
+    const blob = new Blob([template], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'lead-import-template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleCall = (phone) => {
@@ -356,13 +513,22 @@ export default function App() {
               </h1>
               <p className="text-slate-400 text-sm hidden md:block">Lead Tracker CRM</p>
             </div>
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-medium py-2.5 px-4 rounded-xl transition-colors shadow-lg shadow-blue-600/25"
-            >
-              <Plus size={20} />
-              <span className="hidden sm:inline">Add Lead</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white font-medium py-2.5 px-4 rounded-xl transition-colors border border-slate-600"
+              >
+                <Upload size={20} />
+                <span className="hidden sm:inline">Import</span>
+              </button>
+              <button
+                onClick={() => setShowAddModal(true)}
+                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-medium py-2.5 px-4 rounded-xl transition-colors shadow-lg shadow-blue-600/25"
+              >
+                <Plus size={20} />
+                <span className="hidden sm:inline">Add Lead</span>
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -527,6 +693,119 @@ export default function App() {
           onClose={() => setEditingLead(null)}
           title="Edit Lead"
         />
+      )}
+
+      {/* Import CSV Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-800 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden border border-slate-700 shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-slate-700">
+              <h2 className="text-xl font-bold text-white">Import Leads from CSV</h2>
+              <button
+                onClick={handleCancelImport}
+                className="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-4 space-y-4 overflow-y-auto flex-1">
+              {/* Instructions */}
+              <div className="bg-slate-700/50 rounded-lg p-4 text-sm text-slate-300">
+                <p className="font-medium text-white mb-2">CSV Format:</p>
+                <p>Columns: <span className="text-blue-400">Company Name</span> (required), Owner Name, Phone, Niche, Website Status, Notes, Stage</p>
+                <button
+                  onClick={downloadTemplate}
+                  className="mt-3 flex items-center gap-2 text-blue-400 hover:text-blue-300 transition-colors"
+                >
+                  <Download size={16} />
+                  Download template
+                </button>
+              </div>
+
+              {/* File Upload */}
+              <div>
+                <label className="block">
+                  <div className="flex items-center justify-center w-full h-32 border-2 border-dashed border-slate-600 rounded-xl hover:border-blue-500 transition-colors cursor-pointer bg-slate-700/30">
+                    <div className="text-center">
+                      <Upload size={32} className="mx-auto text-slate-400 mb-2" />
+                      <p className="text-slate-300 font-medium">Click to upload CSV</p>
+                      <p className="text-slate-500 text-sm">or drag and drop</p>
+                    </div>
+                  </div>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              {/* Error Message */}
+              {importError && (
+                <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-3 text-red-300 text-sm">
+                  {importError}
+                </div>
+              )}
+
+              {/* Preview */}
+              {importPreview.length > 0 && (
+                <div>
+                  <p className="text-sm font-medium text-slate-300 mb-2">
+                    Preview: {importPreview.length} lead{importPreview.length !== 1 ? 's' : ''} found
+                  </p>
+                  <div className="bg-slate-700/50 rounded-lg overflow-hidden">
+                    <div className="max-h-64 overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-700 sticky top-0">
+                          <tr>
+                            <th className="text-left p-2 text-slate-300 font-medium">Company</th>
+                            <th className="text-left p-2 text-slate-300 font-medium hidden sm:table-cell">Owner</th>
+                            <th className="text-left p-2 text-slate-300 font-medium">Phone</th>
+                            <th className="text-left p-2 text-slate-300 font-medium hidden sm:table-cell">Niche</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {importPreview.slice(0, 10).map((lead, i) => (
+                            <tr key={i} className="border-t border-slate-600">
+                              <td className="p-2 text-white">{lead.companyName}</td>
+                              <td className="p-2 text-slate-400 hidden sm:table-cell">{lead.ownerName || '-'}</td>
+                              <td className="p-2 text-slate-400">{lead.phone || '-'}</td>
+                              <td className="p-2 text-slate-400 hidden sm:table-cell">{lead.niche}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {importPreview.length > 10 && (
+                        <p className="p-2 text-center text-slate-500 text-sm">
+                          ...and {importPreview.length - 10} more
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 p-4 border-t border-slate-700">
+              <button
+                onClick={handleCancelImport}
+                className="flex-1 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-white font-medium rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmImport}
+                disabled={importPreview.length === 0}
+                className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                <Upload size={18} />
+                Import {importPreview.length} Lead{importPreview.length !== 1 ? 's' : ''}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
